@@ -11,74 +11,56 @@ except ModuleNotFoundError:
   import wetrade.project_template.settings as settings
 
 
-def get_text_code(authorize_url, config={}):
-  config = settings.config if config == {} else config
-  headless_login = settings.headless_login if hasattr(settings, 'headless_login') else True
-  if settings.login_method == 'manual':
-    print('login_url', authorize_url)
-    return input('login through url and enter code:')
-  else:
-    if settings.use_2fa == True:
-      totp = TOTP(config['totp_secret'])
-    with sync_playwright() as p:    
-      log_in_background(
-        called_from = 'get_text_code',
-        tags = ['user-message'], 
-        message = time.strftime('%H:%M:%S', time.localtime()) + ': Logging in')
-      try:
-        browser = p.firefox.launch(headless=headless_login)
-        page = browser.new_page()
-        page.goto('https://us.etrade.com/etx/pxy/login')
-        page.locator('#USER').fill(config['username'])
-        page.locator('#password').fill(config['password'])
-        if settings.use_2fa == True:
-          page.locator('[for="useSecurityCode"]').click()
-          page.locator('#securityCode').fill(totp.now())
-        page.locator('#mfaLogonButton').click()
-        page.wait_for_url(lambda url: url != 'https://us.etrade.com/etx/pxy/login', timeout=8000)
-        if '/auth/login/' in page.url: # might need to be more specific
-          page.locator('button:has-text("Continue")').click(timeout=5000)
-        page.goto(authorize_url, wait_until='domcontentloaded')
-        page.locator('[value="Accept"]').click(timeout=6000)
-        text_code = page.locator('input').get_attribute('value').strip()
-        browser.close()
-        log_in_background(
-          called_from = 'get_text_code',
-          tags = ['user-message'], 
-          message = time.strftime('%H:%M:%S', time.localtime()) + ': Login successful')
-        return text_code
-      except Exception as e: # close browser even if there's an exception
-        browser.close()
-        log_in_background(
-          called_from = 'get_text_code',
-          tags = ['user-message'], 
-          message = time.strftime('%H:%M:%S', time.localtime()) + ': Login failed',
-          e = e)
-        return
+class Connection:
+    def __init__(self, settings):
+        self.config = settings.config
+        self.client = OAuth1Session(
+            client_id = self.config['client_key'], 
+            client_secret = self.config['client_secret'],
+            redirect_uri = 'oob'
+            )
+        self.authorize_url = None
+        self.text_code = None
 
-def new_session(config={}):
-  config = settings.config if config == {} else config
-  client = OAuth1Session(
-    client_id = config['client_key'], 
-    client_secret = config['client_secret'],
-    redirect_uri = 'oob')
-  request_token = client.fetch_request_token(
-    url = 'https://api.etrade.com/oauth/request_token',
-    params = {'format': 'json'})
-  authorize_url = 'https://us.etrade.com/e/t/etws/authorize?key={}&token={}'.format(config['client_key'], request_token['oauth_token'])
-  text_code = get_text_code(authorize_url, config)
-  try:
-    client.fetch_access_token(
-      url = 'https://api.etrade.com/oauth/access_token',
-      verifier = text_code)
-    return client
-  except Exception as e: # text code is blank or incorrect
-    log_in_background(
-      called_from = 'new_session',
-      tags = ['user-message'], 
-      message = time.strftime('%H:%M:%S', time.localtime()) + ': Error getting access token, retrying login',
-      e = e)
-    return new_session(config)
+    def set_text_code(self, authorize_url):
+
+        print('login_url', authorize_url)
+        self.text_code = input('Login through url and enter code: ')
+        return self.text_code
+    
+    
+    def set_authorize_url(self, config={}):
+
+        request_token = self.client.fetch_request_token(
+            url = 'https://api.etrade.com/oauth/request_token',
+            params = {'format': 'json'}
+            )
+
+        key =  self.config['client_key']
+        token = request_token['oauth_token']
+
+        self.authorize_url = f"https://us.etrade.com/e/t/etws/authorize?key={key}&token={token}"
+        return self.authorize_url
+    
+    def new_session(self, authorize_url=None, text_code=None):
+        set_authorize_url(self.config)
+    
+        set_text_code(authorize_url)
+   
+        try:
+            self.client.fetch_access_token(
+                url = 'https://api.etrade.com/oauth/access_token',
+                verifier = self.text_code
+                )
+            return self.client
+        except Exception as e: # text code is blank or incorrect
+            log_in_background(
+                called_from = 'new_session',
+                tags = ['user-message'], 
+                message = f"{time.strftime('%H:%M:%S', time.localtime())} : Error getting access token, retrying login",
+                e = e
+                )
+            return new_session(self.config)
   
 class UserSession:
   def __init__(self, config={}):
